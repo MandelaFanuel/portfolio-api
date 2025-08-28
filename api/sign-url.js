@@ -3,10 +3,19 @@ import { createClient } from '@supabase/supabase-js';
 // Configuration Supabase
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE;
-const SUPABASE_BUCKET = process.env.SUPABASE_BUCKET || 'docs-private';
+const SUPABASE_BUCKET = process.env.SUPABASE_BUCKET || 'portofolioBucket';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 
-// Types de documents et leurs chemins
+// Vérification des variables d'environnement
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE || !ADMIN_PASSWORD) {
+  console.error('Missing environment variables:', {
+    hasSupabaseUrl: !!SUPABASE_URL,
+    hasSupabaseKey: !!SUPABASE_SERVICE_ROLE,
+    hasAdminPassword: !!ADMIN_PASSWORD
+  });
+}
+
+// Types de documents
 const DOC_PATHS = {
   cv: 'cv.pdf',
   diplomas: 'diplomes.pdf',
@@ -15,12 +24,21 @@ const DOC_PATHS = {
   portfolio: 'presentation_portfolio.pdf',
 };
 
-// Origines autorisées (CORS)
+// Origines autorisées
 const ALLOWED_ORIGINS = new Set([
   'https://fanuel045.github.io',
   'https://fanuel045.vercel.app',
   'http://localhost:3000',
-  'http://localhost:5500'
+  'http://localhost:5500',
+  'http://localhost:3001'
+]);
+
+// Taille maximale et types MIME
+const MAX_FILE_SIZE = 5 * 1024 * 1024;
+const ALLOWED_MIME_TYPES = new Set([
+  'application/pdf',
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
 ]);
 
 // Initialisation Supabase
@@ -31,107 +49,170 @@ const isValidDocType = (docType) => {
   return Object.prototype.hasOwnProperty.call(DOC_PATHS, docType);
 };
 
-// Middleware de validation
-const validateRequest = (req) => {
-  const origin = req.headers.origin || '';
-  
-  // Vérification CORS
-  if (!ALLOWED_ORIGINS.has(origin)) {
-    return { error: 'Origin not allowed', status: 403 };
+const isValidMimeType = (mimeType) => {
+  return ALLOWED_MIME_TYPES.has(mimeType);
+};
+
+// Handler pour générer une URL signée
+const handleSignUrl = async (body, res) => {
+  const { password, docType } = body;
+
+  if (!docType) {
+    return { error: 'Missing docType', status: 400 };
   }
 
-  // Vérification méthode HTTP
-  if (req.method !== 'POST' && req.method !== 'OPTIONS') {
-    return { error: 'Method not allowed', status: 405 };
+  if (!isValidDocType(docType)) {
+    return { error: 'Invalid document type', status: 400 };
   }
 
-  return { valid: true };
+  // Vérification du mot de passe pour les documents sensibles
+  const sensitiveDocs = ['diplomas', 'certifications', 'motivation', 'portfolio'];
+  if (sensitiveDocs.includes(docType)) {
+    if (!password || password !== ADMIN_PASSWORD) {
+      return { error: 'Unauthorized: Password required', status: 401 };
+    }
+  }
+
+  const path = DOC_PATHS[docType];
+  const isCV = docType === 'cv';
+
+  try {
+    const { data, error } = await supabase.storage
+      .from(SUPABASE_BUCKET)
+      .createSignedUrl(path, 60, { download: isCV });
+
+    if (error) {
+      console.error('Supabase error:', error);
+      return { error: 'Failed to generate signed URL', status: 500 };
+    }
+
+    return { 
+      data: { 
+        url: data.signedUrl,
+        expiresAt: Date.now() + 60000
+      }, 
+      status: 200 
+    };
+  } catch (error) {
+    console.error('Error in handleSignUrl:', error);
+    return { error: 'Internal server error', status: 500 };
+  }
+};
+
+// Handler pour uploader un fichier
+const handleUpload = async (body, res) => {
+  const { password, docType, contentBase64, mimeType } = body;
+
+  if (!password || !docType || !contentBase64) {
+    return { error: 'Missing required fields', status: 400 };
+  }
+
+  if (password !== ADMIN_PASSWORD) {
+    return { error: 'Unauthorized: Invalid password', status: 401 };
+  }
+
+  if (!isValidDocType(docType)) {
+    return { error: 'Invalid document type', status: 400 };
+  }
+
+  if (mimeType && !isValidMimeType(mimeType)) {
+    return { error: 'Invalid file type', status: 400 };
+  }
+
+  // Vérification de la taille
+  const fileSize = Math.ceil(contentBase64.length / 4) * 3;
+  if (fileSize > MAX_FILE_SIZE) {
+    return { error: `File too large. Max: ${MAX_FILE_SIZE / 1024 / 1024}MB`, status: 400 };
+  }
+
+  try {
+    const buffer = Buffer.from(contentBase64, 'base64');
+    const path = DOC_PATHS[docType];
+
+    const { error: uploadError } = await supabase.storage
+      .from(SUPABASE_BUCKET)
+      .upload(path, buffer, {
+        contentType: mimeType || 'application/pdf',
+        upsert: true,
+        cacheControl: '3600'
+      });
+
+    if (uploadError) {
+      console.error('Upload error:', uploadError);
+      return { error: 'Upload failed', status: 500 };
+    }
+
+    return { 
+      data: { 
+        success: true,
+        message: 'File uploaded successfully',
+        documentType: docType
+      }, 
+      status: 200 
+    };
+  } catch (error) {
+    console.error('Error in handleUpload:', error);
+    return { error: 'Internal server error', status: 500 };
+  }
 };
 
 // Handler principal
 export default async function handler(req, res) {
+  // Configuration CORS
+  const origin = req.headers.origin || '';
+  if (ALLOWED_ORIGINS.has(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  }
+  res.setHeader('Vary', 'Origin');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+
+  // Gestion des prévoltes CORS
+  if (req.method === 'OPTIONS') {
+    return res.status(204).end();
+  }
+
+  // Vérification de la méthode
+  if (req.method !== 'POST') {
+    return res.status(405).json({ error: 'Method not allowed' });
+  }
+
   try {
-    // Validation de la requête
-    const validation = validateRequest(req);
-    if (validation.error) {
-      return res.status(validation.status).json({ error: validation.error });
-    }
-
-    // Gestion des prévoltes CORS
-    if (req.method === 'OPTIONS') {
-      const origin = req.headers.origin || '';
-      if (ALLOWED_ORIGINS.has(origin)) {
-        res.setHeader('Access-Control-Allow-Origin', origin);
-      }
-      res.setHeader('Vary', 'Origin');
-      res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-      return res.status(204).end();
-    }
-
     // Vérification Content-Type
     const contentType = req.headers['content-type'];
     if (!contentType || !contentType.includes('application/json')) {
       return res.status(400).json({ error: 'Content-Type must be application/json' });
     }
 
-    // Parse et validation du corps de la requête
+    // Parse du corps
     let body;
     try {
       body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
-    } catch (parseError) {
+    } catch (error) {
       return res.status(400).json({ error: 'Invalid JSON body' });
     }
 
-    const { password, docType } = body || {};
+    const { action } = body;
 
-    // Validation des champs requis
-    if (!docType) {
-      return res.status(400).json({ error: 'Missing docType' });
+    // Exécution de l'action
+    let result;
+    if (action === 'sign') {
+      result = await handleSignUrl(body, res);
+    } else if (action === 'upload') {
+      result = await handleUpload(body, res);
+    } else {
+      return res.status(400).json({ error: 'Invalid action. Use "sign" or "upload"' });
     }
 
-    if (!isValidDocType(docType)) {
-      return res.status(400).json({ error: 'Invalid document type' });
+    // Retour de la réponse
+    if (result.error) {
+      return res.status(result.status).json({ error: result.error });
+    } else {
+      return res.status(result.status).json(result.data);
     }
 
-    // Vérification du mot de passe pour les documents sensibles
-    const sensitiveDocs = ['diplomas', 'certifications', 'motivation', 'portfolio'];
-    if (sensitiveDocs.includes(docType)) {
-      if (!password || password !== ADMIN_PASSWORD) {
-        return res.status(401).json({ error: 'Unauthorized: Password required' });
-      }
-    }
-
-    // Récupération du chemin du document
-    const path = DOC_PATHS[docType];
-    const isCV = docType === 'cv';
-
-    // Génération de l'URL signée (valide 60 secondes)
-    const { data, error } = await supabase.storage
-      .from(SUPABASE_BUCKET)
-      .createSignedUrl(path, 60, { 
-        download: isCV 
-      });
-
-    if (error) {
-      console.error('Supabase error:', error);
-      return res.status(500).json({ error: 'Failed to generate signed URL' });
-    }
-
-    // Réponse sécurisée
-    const origin = req.headers.origin || '';
-    if (ALLOWED_ORIGINS.has(origin)) {
-      res.setHeader('Access-Control-Allow-Origin', origin);
-    }
-    res.setHeader('Vary', 'Origin');
-    
-    return res.status(200).json({ 
-      url: data.signedUrl,
-      expiresAt: Date.now() + 60000 // timestamp d'expiration
-    });
-
-  } catch (err) {
-    console.error('Unexpected error:', err);
+  } catch (error) {
+    console.error('Unexpected error:', error);
     return res.status(500).json({ error: 'Internal server error' });
   }
 }
