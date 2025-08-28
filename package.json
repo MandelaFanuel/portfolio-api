@@ -1,0 +1,32 @@
+{
+  "name": "fanuel045-api",
+  "version": "1.0.0",
+  "description": "API serverless sécurisée pour la gestion des documents du portfolio - URLs signées et uploads sécurisés",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "vercel dev",
+    "start": "vercel start",
+    "deploy": "vercel --prod",
+    "test": "echo \"No tests specified\" && exit 0"
+  },
+  "keywords": [
+    "supabase",
+    "api",
+    "serverless",
+    "portfolio",
+    "documents",
+    "secure"
+  ],
+  "author": "Fanuel045",
+  "license": "MIT",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.56.0"
+  },
+  "devDependencies": {
+    "vercel": "^35.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
